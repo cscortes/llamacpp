@@ -1,0 +1,78 @@
+{
+  "name": "vscode-llamacpp",
+  "displayName": "llama.cpp Local AI",
+  "description": "Copilot Chat and inline completions powered by your local llama.cpp server",
+  "version": "0.1.0",
+  "publisher": "llamacpp-local",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["AI", "Chat"],
+  "enabledApiProposals": ["languageModels"],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "llamacpp.assistant",
+        "name": "llama",
+        "description": "Chat with your local llama.cpp model (phi / qwen2 / deep)",
+        "isSticky": true
+      }
+    ],
+    "configuration": {
+      "title": "llama.cpp Local AI",
+      "properties": {
+        "llamacpp.endpoint": {
+          "type": "string",
+          "default": "http://localhost:18080",
+          "description": "llama.cpp server base URL"
+        },
+        "llamacpp.model": {
+          "type": "string",
+          "default": "qwen2",
+          "enum": ["phi", "qwen2", "deep"],
+          "enumDescriptions": [
+            "Phi-3.5-mini-instruct — 2.5 GB, fastest",
+            "Qwen2.5-Coder-7B-Instruct — 4.4 GB, default",
+            "DeepSeek-Coder-V2-Lite-Instruct — 7.6 GB, most capable"
+          ],
+          "description": "Active model (must match what the server loaded)"
+        },
+        "llamacpp.inlineCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable ghost-text inline completions"
+        },
+        "llamacpp.inlineMaxTokens": {
+          "type": "number",
+          "default": 128,
+          "description": "Max tokens returned for inline completions"
+        },
+        "llamacpp.chatMaxTokens": {
+          "type": "number",
+          "default": 2048,
+          "description": "Max tokens returned for @llama chat responses"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "llamacpp.switchModel",
+        "title": "llama.cpp: Switch Model"
+      },
+      {
+        "command": "llamacpp.checkServer",
+        "title": "llama.cpp: Check Server Status"
+      }
+    ]
+  },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}
