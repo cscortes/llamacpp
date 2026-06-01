@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { endpoint, activeModel } from './models';
+import { endpoint } from './models';
 import { out } from './extension';
+import { notifyProviderConfigChanged } from './lmProvider';
 
 let statusBar: vscode.StatusBarItem;
 
@@ -39,6 +40,7 @@ async function changeEndpoint(): Promise<void> {
         'endpoint', value, vscode.ConfigurationTarget.Global
     );
     out.appendLine(`[${ts()}] Endpoint changed to ${value}`);
+    notifyProviderConfigChanged();
 }
 
 async function checkAndReport(): Promise<void> {
@@ -54,26 +56,38 @@ async function checkAndReport(): Promise<void> {
 let lastOnline: boolean | undefined;
 
 async function updateStatus(): Promise<void> {
-    const model = activeModel();
-    const online = await ping();
+    let online = false;
+    let modelDisplay = '';
+
+    try {
+        const res = await fetch(`${endpoint()}/v1/models`, { signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+            online = true;
+            const json: any = await res.json();
+            const models: { id: string }[] = json.data ?? [];
+            if (models.length > 0) {
+                modelDisplay = models[0].id.replace(/\.gguf$/i, '').replace(/^.*[/\\]/, '');
+            }
+        }
+    } catch { /* offline */ }
 
     if (online !== lastOnline) {
         lastOnline = online;
         if (online) {
-            out.appendLine(`[${ts()}] Server online — ${endpoint()}  model: ${model.id}`);
+            out.appendLine(`[${ts()}] Server online — ${endpoint()}  model: ${modelDisplay || 'unknown'}`);
         } else {
             out.appendLine(`[${ts()}] Server offline — ${endpoint()} unreachable`);
         }
     }
 
     if (online) {
-        statusBar.text = `$(sparkle) llama: ${model.id}`;
-        statusBar.tooltip = `${model.label}\n${model.detail}\n${endpoint()}`;
-        statusBar.backgroundColor = undefined;
+        statusBar.text = `$(pass-filled) llama: ${modelDisplay || 'ready'}`;
+        statusBar.tooltip = `Online — ${endpoint()}\nClick to change endpoint`;
+        statusBar.backgroundColor = new vscode.ThemeColor('llamacpp.statusBarOk');
     } else {
-        statusBar.text = `$(warning) llama: offline`;
-        statusBar.tooltip = `Server not reachable at ${endpoint()}\nRun: make server`;
-        statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        statusBar.text = `$(error) llama: offline`;
+        statusBar.tooltip = `Server not reachable at ${endpoint()}\nClick to change endpoint`;
+        statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
     }
 }
 

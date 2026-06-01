@@ -31,11 +31,12 @@ Image supports both profiles; ~1.5-3GB. See `Dockerfile` (conditional build) and
 ## Step-by-Step Setup with Hardware Profile (RAM/VRAM Configuration)
 
 1. **Prerequisites**
-   - NVIDIA RTX 3060 (or similar) with latest drivers + CUDA on WSL (see https://developer.nvidia.com/cuda/wsl).
-   - Podman with nvidia-container-toolkit in the machine (for GPU passthrough and CDI).
-   - **Git Bash only** (`C:\Program Files\Git\bin\bash.exe` - PowerShell breaks Makefile).
+   - NVIDIA RTX 3060 (or similar) with CUDA-on-WSL drivers installed on the Windows host (see https://developer.nvidia.com/cuda/wsl). Verify with `nvidia-smi` in PowerShell — must show the GPU before anything else works.
+   - Podman installed and initialised (`podman machine start`).
+   - nvidia-container-toolkit installed inside the Podman VM with a CDI spec generated — run `make setup-gpu` after first `make reset` (see GPU Passthrough Setup below).
+   - **Git Bash only** (`C:\Program Files\Git\bin\bash.exe` — PowerShell breaks Makefile heredocs, `||`, and variable expansion).
    - 30GB+ free disk (models ~13GB, devel image, ccache).
-   - Edit `Makefile` profile block if your exact RAM/VRAM differs (default rog3060 uses RAM_GB=40, VRAM_GB=6).
+   - Edit `Makefile` profile block if your RAM/VRAM differs (default rog3060 uses RAM_GB=40, VRAM_GB=6).
 
 2. **Configure Hardware Profile (RAM vs VRAM)**
    - Open `Makefile`.
@@ -45,18 +46,53 @@ Image supports both profiles; ~1.5-3GB. See `Dockerfile` (conditional build) and
      - Derived vars (THREADS, N_GPU_LAYERS, VIDEO_OPT_FLAGS, PODMAN_RAM_MB, RUN_CAPS) auto-adjust for video tricks (17+ t/s, 256k ctx on 6GB VRAM).
    - Save. Use `HARDWARE_PROFILE=rog3060` (or your custom name) for all commands.
 
-3. **Build and Run** (post libcuda fix - always clean+build after Dockerfile changes)
+3. **GPU Passthrough Setup** (required for rog3060 profile; must repeat after every `make reset`)
+
+   GPU access inside the Podman container requires four layers to be working in order:
+
+   | # | Layer | What's needed | How to verify |
+   |---|---|---|---|
+   | 1 | Windows host | CUDA-on-WSL driver installed | `nvidia-smi` in PowerShell |
+   | 2 | Podman VM | nvidia-container-toolkit + CDI spec | `make setup-gpu` |
+   | 3 | Podman machine | Restart after toolkit install | `podman machine stop && podman machine start` |
+   | 4 | Makefile | `--device nvidia.com/gpu=all` in RUN_CAPS | already set for rog3060 profile |
+
    ```bash
-   make getmodels          # Download models (~13GB; run once)
-   make reset              # Profile-driven Podman machine (Git Bash only; uses PODMAN_RAM_MB from profile)
-   # GPU profile (CUDA enabled):
-   HARDWARE_PROFILE=rog3060 make clean && HARDWARE_PROFILE=rog3060 make build  # Uses CUDA_ARCH=86 + conditional flags
-   HARDWARE_PROFILE=rog3060 make rog3060 MODEL_SHORT=deep  # Optimized server with video flags, VRAM=6
-   # CPU fallback (no CUDA dep):
-   # make clean && make build && make server MODEL_SHORT=deep
+   # Step 1 — verify Windows host sees the GPU (PowerShell, not Git Bash):
+   nvidia-smi                               # must show RTX 3060 before proceeding
+
+   # Step 2 — install toolkit and generate CDI spec inside the Podman VM:
+   make setup-gpu                           # installs nvidia-container-toolkit, writes /etc/cdi/nvidia.yaml
+
+   # Step 3 — REQUIRED: restart Podman machine so CDI config takes effect:
+   podman machine stop && podman machine start
+
+   # Step 4 — start server with GPU flags and verify:
+   HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2
+   make logs | grep -E "CUDA|cuda|n_gpu_layers|device"   # look for "found 1 CUDA devices"
+   make live-stats                          # GPU access shows YES (/dev/dxg — WSL passthrough mode)
    ```
 
-4. **Monitoring and Tuning**
+   > **After every `make reset`**: the Podman VM is destroyed and re-created. Re-run `make setup-gpu` then `podman machine stop && podman machine start` before starting the server.
+
+   > **WSL note**: In WSL mode the GPU device is `/dev/dxg` (DirectX Graphics), not `/dev/nvidia0`. `make live-stats` reports "WSL passthrough mode" when this is working correctly.
+
+4. **Build and Run** (always clean+build after Dockerfile changes)
+   ```bash
+   make getmodels                                       # Download models (~13GB; run once)
+   make reset                                           # Init Podman machine (Git Bash only)
+   make setup-gpu                                       # Install GPU toolkit in Podman VM
+   podman machine stop && podman machine start          # Restart so CDI takes effect
+   HARDWARE_PROFILE=rog3060 make build                  # Compile with CUDA_ARCH=86
+   HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2
+   make logs | grep -E "CUDA|cuda|n_gpu_layers|device" # Verify GPU initialised
+   make live-stats                                      # Full status: GPU, model, host URL
+   make win-forward                                     # Map VM IP to localhost (if needed)
+   # CPU fallback (no CUDA, no toolkit needed):
+   # make build && make server MODEL_SHORT=qwen2
+   ```
+
+5. **Monitoring and Tuning**
    - `make logs` (now succeeds without libcuda.so.1 error; watch for CUDA detection, BLAS fallback, "listening on http://0.0.0.0:18080", tokens/sec).
    - `nvidia-smi` inside container (if GPU profile + toolkit) or host to monitor VRAM/layers offloaded.
    - `make ccache-stats`, `make test`, `podman logs --tail 50 llamacpp-server`.
@@ -99,9 +135,19 @@ curl http://localhost:18080/v1/chat/completions \
 See `LessonsLearned.md` (Hardware Profile section) for troubleshooting, full verification, and permanent practices. `make help` for targets.
 ## Makefile Targets
 
-See `make help` (now GPU-focused) or file comments. Key change: `--gpus all` restored for CUDA.
-- `server MODEL_SHORT=... [PORT=8080]`: Background API server.
-- `build`, `clean`, `run`, `help`.
+Run `make info` for the full structured reference. Key targets:
+
+| Target | Description |
+|---|---|
+| `make getmodels` | Download all 3 GGUF models (~13 GB) |
+| `make reset` | Initialise/reinitialise Podman + WSL (Git Bash only) |
+| `make setup-gpu` | Install nvidia-container-toolkit + generate CDI spec in Podman VM |
+| `make build` | Build the container image (use `HARDWARE_PROFILE=rog3060` for CUDA) |
+| `make server` | Start the API server (use `MODEL_SHORT=qwen2\|phi\|deep`) |
+| `make live-stats` | Show container, process, model, GPU access/VRAM, and host URL |
+| `make stop` | Stop the server container |
+| `make build-extension` | Build the VS Code Copilot extension |
+| `make info` | Full target reference with primary/secondary sections |
 
 ## Models (./models/)
 
@@ -117,9 +163,11 @@ See `make help` (now GPU-focused) or file comments. Key change: `--gpus all` res
 - ccache stats printed post-build.
 
 ## Notes
-- **GPU Required**: NVIDIA CUDA GPU. Uses official nvidia/cuda:12.5.1 images.
-- `--gpus all` enabled in Makefile. See `LessonsLearned.md` for Windows Podman CDI/GPU setup (previous manifest and device errors resolved by using valid tags + Ubuntu base).
-- Tested with coding models on CUDA. Update CMake flags or clone in `Dockerfile` as needed.
+- **GPU access** uses `--device nvidia.com/gpu=all` (CDI) rather than `--gpus all`. Requires `make setup-gpu` + `podman machine stop && podman machine start` after every `make reset`.
+- **WSL GPU device**: In WSL mode the GPU appears as `/dev/dxg` (not `/dev/nvidia0`). `make live-stats` reports "WSL passthrough mode" when working. Use `make logs | grep -i cuda` to confirm CUDA initialised inside the container.
+- **Full GPU setup sequence**: `make reset` → `make setup-gpu` → `podman machine stop && podman machine start` → `HARDWARE_PROFILE=rog3060 make build` → `HARDWARE_PROFILE=rog3060 make server` → `make logs` → `make live-stats`.
+- **If `make live-stats` shows GPU access NO after all steps**: the Podman machine restart was likely skipped. Stop the server, restart the machine, and start the server again.
+- Tested with coding models on CUDA (RTX 3060, CUDA_ARCH=86). Update the profile block in `Makefile` for other GPUs.
 
 ## Features
 - Multi-stage (~250MB image).

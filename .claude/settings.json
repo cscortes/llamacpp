@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:marketplace.visualstudio.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}

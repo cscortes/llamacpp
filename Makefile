@@ -23,7 +23,7 @@
 # Force bash (Git Bash on Windows; required for reset/heredoc/||). Windows targets (test/win-forward) updated for compatibility.
 SHELL := bash
 
-.PHONY: build clean reset run help info getmodels cli server stop prune build-extension live-stats
+.PHONY: build clean reset run help info getmodels cli server stop prune build-extension live-stats setup-gpu
 .DEFAULT_GOAL := info
 
 # Model short names (case-insensitive partial match):
@@ -51,12 +51,20 @@ HARDWARE_PROFILE ?= default
 ifeq ($(HARDWARE_PROFILE),rog3060)
   CUDA_ARCH = 86
   THREADS = 12
-  N_GPU_LAYERS = 35
+  # 20 layers on GPU leaves ~1.8GB headroom for KV cache + compute on 6GB VRAM laptop.
+  # Raise toward 28 (all layers) only after confirming the model loads without OOM.
+  N_GPU_LAYERS = 10
   RAM_GB = 40
   VRAM_GB = 6
   PODMAN_RAM_MB = 32768
-  VIDEO_OPT_FLAGS = --no-mmap --mlock --n-cpu-moe 41 --cache-type-k q4_0 --cache-type-v q8_0
-  RUN_CAPS = --cap-add=IPC_LOCK --ipc=host
+  # 8192 context fits within the ~1.8GB headroom left by 20 GPU layers.
+  CONTEXT_SIZE = 8192
+  # cache-type-k/v quantization requires Flash Attention (--flash-attn / -DLLAMA_FLASH_ATTN=ON).
+  # Removed until FA is compiled in; default fp16 KV cache works fine at 10 GPU layers + 8192 ctx.
+  VIDEO_OPT_FLAGS = --no-mmap
+  # --device nvidia.com/gpu=all requires nvidia-container-toolkit + CDI in the Podman VM.
+  # Run 'make setup-gpu' then 'podman machine stop && podman machine start' if this fails.
+  RUN_CAPS = --cap-add=IPC_LOCK --ipc=host --device nvidia.com/gpu=all
 else
   # Default: conservative CPU-only (matches prior server target)
   CUDA_ARCH = 0
@@ -65,6 +73,7 @@ else
   RAM_GB = 16
   VRAM_GB = 0
   PODMAN_RAM_MB = 16384
+  CONTEXT_SIZE = 4096
   VIDEO_OPT_FLAGS =
   RUN_CAPS =
 endif
@@ -196,7 +205,7 @@ info:
 	@echo "  make test                           Verify server is responding"
 	@echo "  make stop                           Stop and remove the server container"
 	@echo "  make clean                          Remove image + container (keeps ccache)"
-	@echo "  make build-extension                Build the VS Code Copilot extension"
+	@echo "  make build-extension                Build the VS Code extension (Copilot Chat + model picker + inline)"
 	@echo ""
 	@echo "  Typical first-time flow:"
 	@echo "    make getmodels"
@@ -208,6 +217,7 @@ info:
 	@echo ""
 	@echo "------------------------------- Secondary Targets -------------------------------"
 	@echo ""
+	@echo "  make setup-gpu                      Install nvidia-container-toolkit + CDI in Podman VM"
 	@echo "  make live-stats                     Container state, process, model, memory, host URL"
 	@echo "  make rog3060                        Start server with RTX 3060 / 40 GB profile"
 	@echo "  make win-forward  [PORT=$(PORT)]        Proxy VM IP to localhost (run as Admin)"
@@ -264,7 +274,7 @@ server:
 		-m /models/$(MODEL_FILE) \
 		--host 0.0.0.0 \
 		--port $(PORT) \
-		-c 16384 \
+		-c $(CONTEXT_SIZE) \
 		--n-gpu-layers $(N_GPU_LAYERS) \
 		--threads $(THREADS) \
 		$(VIDEO_OPT_FLAGS)
@@ -276,9 +286,8 @@ logs:
 	-podman logs --tail 100 llamacpp-server 2>&1 || echo "No logs (container may not be running). Try 'make server' first."
 
 # ======================================================================================
-# live-stats: checks container state, llama-server process inside the container,
-# active model, memory use, GPU VRAM (if nvidia-smi is available), and the host-
-# accessible URL (Podman VM IP + mapped port).
+# live-stats: container state, llama-server process, model, memory, GPU layers/access/
+# VRAM (with VM-host fallback and CDI warning), and public host URL.
 # ======================================================================================
 live-stats:
 	@echo ""
@@ -313,14 +322,56 @@ live-stats:
 		exit 0; \
 	fi; \
 	echo "  Process   : llama-server  (PID $$PID)"; \
-	GPU=$$(podman exec llamacpp-server nvidia-smi \
-		--query-gpu=memory.used,memory.total,utilization.gpu \
-		--format=csv,noheader,nounits 2>/dev/null | head -1); \
-	if [ -n "$$GPU" ]; then \
-		MU=$$(echo "$$GPU" | cut -d, -f1 | tr -d ' '); \
-		MT=$$(echo "$$GPU" | cut -d, -f2 | tr -d ' '); \
-		GU=$$(echo "$$GPU" | cut -d, -f3 | tr -d ' '); \
-		echo "  GPU VRAM  : $${MU} MiB / $${MT} MiB  ($${GU}% util)"; \
+	N_LAYERS=$$(podman inspect llamacpp-server \
+		--format '{{range .Config.Cmd}}{{.}} {{end}}' 2>/dev/null \
+		| grep -oP '(?<=--n-gpu-layers )\d+'); \
+	N_LAYERS=$${N_LAYERS:-0}; \
+	if [ "$$N_LAYERS" = "0" ]; then \
+		echo "  GPU layers : 0  (CPU-only — rebuild with HARDWARE_PROFILE=rog3060 for GPU)"; \
+	else \
+		echo "  GPU layers : $$N_LAYERS offloaded to GPU"; \
+	fi; \
+	GPU_DEVS=$$(podman exec llamacpp-server sh -c \
+		'ls /dev/nvidia[0-9] /dev/dxg 2>/dev/null | wc -l' 2>/dev/null); \
+	GPU_DEVS=$${GPU_DEVS:-0}; \
+	DXG=$$(podman exec llamacpp-server sh -c \
+		'[ -e /dev/dxg ] && echo wsl || echo native' 2>/dev/null); \
+	if [ "$$GPU_DEVS" -gt 0 ]; then \
+		[ "$$DXG" = "wsl" ] \
+			&& echo "  GPU access : YES  (/dev/dxg — WSL passthrough mode)" \
+			|| echo "  GPU access : YES  ($$GPU_DEVS /dev/nvidia device(s))"; \
+		WSL_SMI=$$(podman exec llamacpp-server sh -c \
+			'find /usr/lib/wsl/drivers -name nvidia-smi 2>/dev/null | head -1' 2>/dev/null); \
+		SMIOUT=$$(podman exec llamacpp-server sh -c \
+			"$${WSL_SMI:-nvidia-smi} --query-gpu=name,memory.used,memory.total,utilization.gpu \
+			--format=csv,noheader,nounits 2>/dev/null | head -1" 2>/dev/null); \
+		if [ -n "$$SMIOUT" ]; then \
+			GNAME=$$(echo "$$SMIOUT" | cut -d, -f1 | sed 's/^ *//;s/ *$$//'); \
+			MU=$$(echo "$$SMIOUT"    | cut -d, -f2 | tr -d ' '); \
+			MT=$$(echo "$$SMIOUT"    | cut -d, -f3 | tr -d ' '); \
+			GU=$$(echo "$$SMIOUT"    | cut -d, -f4 | tr -d ' '); \
+			echo "  GPU       : $$GNAME"; \
+			echo "  GPU VRAM  : $${MU} MiB / $${MT} MiB  ($${GU}% util)"; \
+		else \
+			echo "  GPU VRAM  : (nvidia-smi not in container — check make logs for CUDA init)"; \
+		fi; \
+	else \
+		echo "  GPU access : NO  (/dev/nvidia* and /dev/dxg not found in container)"; \
+		[ "$$N_LAYERS" != "0" ] && \
+			echo "               WARNING: $$N_LAYERS layers requested but no GPU visible — try: podman machine stop && podman machine start" || true; \
+		VM_SMI=$$(podman machine ssh \
+			"find /usr/lib/wsl/drivers -name nvidia-smi 2>/dev/null | head -1" 2>/dev/null); \
+		VMGPU=$$(podman machine ssh \
+			"$${VM_SMI:-nvidia-smi} --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1" \
+			2>/dev/null); \
+		if [ -n "$$VMGPU" ]; then \
+			VGNAME=$$(echo "$$VMGPU" | cut -d, -f1 | sed 's/^ *//;s/ *$$//'); \
+			VMU=$$(echo "$$VMGPU" | cut -d, -f2 | tr -d ' '); \
+			VMT=$$(echo "$$VMGPU" | cut -d, -f3 | tr -d ' '); \
+			echo "  GPU (VM)  : $$VGNAME — $${VMU}/$${VMT} MiB  (present in VM but NOT reaching container)"; \
+		else \
+			echo "  GPU (VM)  : not reachable — run 'make setup-gpu' if not done, then restart Podman machine"; \
+		fi; \
 	fi; \
 	echo ""; \
 	VM_IP=$$(podman machine ssh \
@@ -347,9 +398,9 @@ stop:
 # ======================================================================================
 # Build the VS Code extension (vscode-llamacpp/) using npm + tsc.
 # Requires Node.js 18+. Outputs compiled JS to vscode-llamacpp/out/.
-# After building: open vscode-llamacpp/ in VS Code and press F5 to launch
-# the Extension Development Host with @llama chat + inline completions active.
-# Models: phi (Phi-3.5-mini) | qwen2 (Qwen2.5-Coder-7B) | deep (DeepSeek-Coder-V2-Lite)
+# Proposed API (model picker) is enabled at runtime via launch.json --enable-proposed-api;
+# no type-definition download needed because the provider calls use (vscode.lm as any).
+# After building: open vscode-llamacpp/ in VS Code and press F5.
 # ======================================================================================
 build-extension:
 	@echo "=== Building VS Code extension (vscode-llamacpp/) ==="
@@ -374,11 +425,67 @@ build-extension:
 	@echo ""
 	@echo "SUCCESS: Extension built to vscode-llamacpp/out/"
 	@echo ""
-	@echo "  To launch:  Open vscode-llamacpp/ in VS Code, press F5 (Extension Development Host)"
-	@echo "  In chat:    Type @llama <question> in Copilot Chat"
-	@echo "  Models:     phi | qwen2 | deep  (match the model the server loaded)"
-	@echo "  Switch:     Ctrl+Shift+P -> 'llama.cpp: Switch Model'"
-	@echo "  Package:    npm install -g @vscode/vsce && vsce package (in vscode-llamacpp/)"
+	@echo "  To launch:     Open vscode-llamacpp/ in VS Code, press F5 (Extension Development Host)"
+	@echo "  @llama chat:   Type @llama <question> in Copilot Chat"
+	@echo "  Model picker:  Open Copilot Chat model dropdown → select phi / qwen2 / deep"
+	@echo "  Switch model:  Ctrl+Shift+P -> 'llama.cpp: Switch Model'"
+	@echo "  Inline:        Copilot ghost-text is disabled; llama.cpp handles all completions"
+	@echo "  Package:       npm install -g @vscode/vsce && vsce package --allow-proposed-api"
+
+# ======================================================================================
+# setup-gpu: installs nvidia-container-toolkit inside the Podman VM and generates the
+# CDI spec that allows 'podman run --device nvidia.com/gpu=all' to work.
+# Must be re-run after every 'make reset' (podman machine rm destroys the VM state).
+# Requires: NVIDIA CUDA-on-WSL drivers installed on the Windows host first.
+# ======================================================================================
+setup-gpu:
+	@echo "=== Installing nvidia-container-toolkit in Podman VM ==="
+	@echo "Requires NVIDIA CUDA-on-WSL drivers on Windows host (run nvidia-smi in PowerShell first)."
+	@echo ""
+	@podman machine ssh ' \
+		set -e; \
+		sudo mkdir -p /etc/cdi; \
+		if command -v dnf >/dev/null 2>&1; then \
+			echo "--- Fedora/RHEL detected (dnf) ---"; \
+			curl -sL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+				| sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo > /dev/null; \
+			sudo dnf install -y nvidia-container-toolkit; \
+		elif command -v apt-get >/dev/null 2>&1; then \
+			echo "--- Ubuntu/Debian detected (apt-get) ---"; \
+			sudo mkdir -p /usr/share/keyrings /etc/apt/sources.list.d; \
+			curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+				| sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg; \
+			curl -sL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+				| sed "s|deb https://|deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://|g" \
+				| sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null; \
+			sudo apt-get update -qq && sudo apt-get install -y nvidia-container-toolkit; \
+		else \
+			echo "ERROR: neither dnf nor apt-get found in Podman VM"; exit 1; \
+		fi; \
+		sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml; \
+		echo "CDI spec written to /etc/cdi/nvidia.yaml"; \
+		set +e; \
+		NVIDIA_SMI=$$(find /usr/lib/wsl/drivers -name "nvidia-smi" 2>/dev/null | head -1); \
+		if [ -n "$$NVIDIA_SMI" ]; then \
+			"$$NVIDIA_SMI" --query-gpu=name,driver_version --format=csv,noheader; \
+		elif command -v nvidia-smi >/dev/null 2>&1; then \
+			nvidia-smi --query-gpu=name,driver_version --format=csv,noheader; \
+		else \
+			echo "nvidia-smi not in PATH (normal in WSL mode — GPU confirmed via CDI spec)"; \
+		fi; \
+	' || { \
+		echo ""; \
+		echo "FAILED: see errors above."; \
+		echo "  Common causes:"; \
+		echo "  1. Podman machine not running (run: podman machine start)"; \
+		echo "  2. Network issue in VM (test: podman machine ssh curl -s https://nvidia.github.io)"; \
+		echo "  3. NVIDIA CUDA-on-WSL driver not on Windows host (verify: nvidia-smi in PowerShell)"; \
+		exit 1; \
+	}
+	@echo ""
+	@echo "SUCCESS: toolkit installed and CDI spec generated."
+	@echo "Run: HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2"
+	@echo "Then: make live-stats  (GPU access should show YES)"
 
 vm-ip:
 	@echo "Podman VM IP:"

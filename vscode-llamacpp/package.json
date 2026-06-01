@@ -1,19 +1,37 @@
 {
   "name": "vscode-llamacpp",
   "displayName": "llama.cpp Local AI",
-  "description": "Copilot Chat and inline completions powered by your local llama.cpp server",
+  "description": "Copilot Chat model provider and inline completions powered by your local llama.cpp server",
   "version": "0.1.0",
   "publisher": "llamacpp-local",
-  "engines": { "vscode": "^1.90.0" },
+  "engines": { "vscode": "^1.96.0" },
   "categories": ["AI", "Chat"],
-  "enabledApiProposals": ["languageModels"],
   "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "llamacpp",
+        "displayName": "Llama.cpp Local AI",
+        "managementCommand": "llamacpp.changeEndpoint"
+      }
+    ],
     "chatParticipants": [
       {
         "id": "llamacpp.assistant",
         "name": "llama",
-        "description": "Chat with your local llama.cpp model (phi / qwen2 / deep)",
+        "description": "Chat with your local llama.cpp model",
         "isSticky": true
+      }
+    ],
+    "colors": [
+      {
+        "id": "llamacpp.statusBarOk",
+        "description": "llama.cpp status bar background when the server is online",
+        "defaults": {
+          "dark": "#16825D",
+          "light": "#1a7a40",
+          "highContrast": "#89d185",
+          "highContrastLight": "#1a7a40"
+        }
       }
     ],
     "configuration": {
@@ -27,13 +45,7 @@
         "llamacpp.model": {
           "type": "string",
           "default": "qwen2",
-          "enum": ["phi", "qwen2", "deep"],
-          "enumDescriptions": [
-            "Phi-3.5-mini-instruct — 2.5 GB, fastest",
-            "Qwen2.5-Coder-7B-Instruct — 4.4 GB, default",
-            "DeepSeek-Coder-V2-Lite-Instruct — 7.6 GB, most capable"
-          ],
-          "description": "Active model (must match what the server loaded)"
+          "description": "Model ID for @llama chat and inline completions. Should match the model name reported by the server at /v1/models. Use 'llama.cpp: Switch Model' to pick from live server models."
         },
         "llamacpp.inlineCompletions": {
           "type": "boolean",
@@ -54,6 +66,10 @@
     },
     "commands": [
       {
+        "command": "llamacpp.changeEndpoint",
+        "title": "llama.cpp: Change Server Endpoint"
+      },
+      {
         "command": "llamacpp.switchModel",
         "title": "llama.cpp: Switch Model"
       },
@@ -72,7 +88,7 @@
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.96.0",
     "typescript": "^5.4.0"
   }
 }
