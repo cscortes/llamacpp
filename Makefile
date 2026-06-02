@@ -23,7 +23,7 @@
 # Force bash (Git Bash on Windows; required for reset/heredoc/||). Windows targets (test/win-forward) updated for compatibility.
 SHELL := bash
 
-.PHONY: build clean reset run help info getmodels cli server stop prune build-extension live-stats setup-gpu
+.PHONY: build clean reset run help info getmodels cli server stop prune build-extension live-stats setup-gpu rog3060 rog3060-build rog3060-server restart-podman
 .DEFAULT_GOAL := info
 
 # Model short names (case-insensitive partial match):
@@ -164,7 +164,7 @@ help:
 	@echo "  make clean-cache  - Reset ccache volume"
 	@echo "  make ccache-stats - Show ccache statistics"
 	@echo "  make server       - Start HTTP server/API (uses profile)"
-	@echo "  make rog3060      - Convenience: run server with rog3060 profile (40GB RAM, 6GB VRAM)"
+	@echo "  make rog3060      - Run the full ROG 3060 GPU setup workflow (getmodels, reset, setup-gpu, restart, build, server)"
 	@echo "  make test         - Test API (uses localhost after win-forward)"
 	@echo "  make logs         - Follow server logs"
 	@echo "  make live-stats   - Container, process, model, memory, host URL"
@@ -219,7 +219,7 @@ info:
 	@echo ""
 	@echo "  make setup-gpu                      Install nvidia-container-toolkit + CDI in Podman VM"
 	@echo "  make live-stats                     Container state, process, model, memory, host URL"
-	@echo "  make rog3060                        Start server with RTX 3060 / 40 GB profile"
+	@echo "  make rog3060                        Run the full ROG 3060 GPU setup workflow"
 	@echo "  make win-forward  [PORT=$(PORT)]        Proxy VM IP to localhost (run as Admin)"
 	@echo "  make vm-ip                          Print current Podman VM IP address"
 	@echo "  make logs                           Stream server container logs"
@@ -236,19 +236,47 @@ info:
 	@echo "================================================================================"
 
 # Convenience target for this hardware (uses profile vars for RAM/VRAM/video optimizations).
-# Uses bash -c to avoid Win32 make path-with-parentheses parsing error in sh -c.
-rog3060:
-	@bash -c 'HARDWARE_PROFILE=rog3060 make server'
+# Runs the full ROG 3060 workflow: models, reset, GPU setup, restart, build, and server.
+rog3060: getmodels reset setup-gpu restart-podman rog3060-build rog3060-server
+	@echo ""
+	@echo "ROG 3060 setup complete. Verify GPU initialization with:"
+	@echo "  make logs | grep -E \"CUDA|cuda|n_gpu_layers|device\""
+	@echo "  make live-stats"
+	@echo ""
+
+restart-podman:
+	podman machine stop && podman machine start
+
+rog3060-build:
+	HARDWARE_PROFILE=rog3060 make build
+
+rog3060-server:
+	HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2
 
 # ======================================================================================
 # Download 3 coding GGUF models to ./models (~13GB)
 # ======================================================================================
 getmodels:
 	mkdir -p models
-	@echo "Downloading coding models to models/ (this may take 10-30min depending on connection)..."
-	curl -L -o models/Phi-3.5-mini-instruct-q4_K_M.gguf https://huggingface.co/microsoft/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-q4_K_M.gguf
-	curl -L -o models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
-	curl -L -o models/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf
+	@echo "Checking model files in models/ ..."
+	@if [ -f models/Phi-3.5-mini-instruct-q4_K_M.gguf ]; then \
+		echo "Skipping Phi-3.5-mini model (already present)."; \
+	else \
+		echo "Downloading Phi-3.5-mini model..."; \
+		curl -L -o models/Phi-3.5-mini-instruct-q4_K_M.gguf https://huggingface.co/microsoft/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-q4_K_M.gguf; \
+	fi
+	@if [ -f models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf ]; then \
+		echo "Skipping Qwen2 model (already present)."; \
+	else \
+		echo "Downloading Qwen2 model..."; \
+		curl -L -o models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf; \
+	fi
+	@if [ -f models/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf ]; then \
+		echo "Skipping DeepSeek model (already present)."; \
+	else \
+		echo "Downloading DeepSeek model..."; \
+		curl -L -o models/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf; \
+	fi
 	@echo "Models ready in models/!"
 
 # ======================================================================================
@@ -495,8 +523,8 @@ win-forward:
 	@echo "=== Setting Windows localhost forwarding for port $(PORT) ==="
 	@VM_IP=$$(podman machine ssh "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" 2>/dev/null || echo "172.26.156.205"); \
 	echo "Using VM IP: $$VM_IP"; \
-	powershell -Command "netsh interface portproxy delete v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 2> nul; netsh interface portproxy add v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 connectport=$(PORT) connectaddress='$$VM_IP'; netsh interface portproxy show v4tov4 listenport=$(PORT); Write-Host 'Port forwarding active. Test with: curl http://localhost:$(PORT)/v1/models' -ForegroundColor Green" || echo "Run PowerShell as Administrator for netsh."
-	@echo "(If netsh fails, run terminal as Administrator or use VM IP directly: http://172.26.156.205:$(PORT)")
+	powershell -Command "$$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]'Administrator'); if (-not $$IsAdmin) { Write-Host 'ERROR: This command requires Administrator privileges.' -ForegroundColor Red; Write-Host 'Please run Git Bash or PowerShell as Administrator and try again.' -ForegroundColor Yellow; exit 1 }; $$ErrorActionPreference='SilentlyContinue'; netsh interface portproxy delete v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 | Out-Null; netsh interface portproxy add v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 connectport=$(PORT) connectaddress='$$VM_IP'; netsh interface portproxy show v4tov4 listenport=$(PORT); Write-Host 'Port forwarding active. Test with: curl http://localhost:$(PORT)/v1/models' -ForegroundColor Green" || echo "Port forwarding setup failed. Verify you ran as Administrator."
+	@echo "(Alternatively, use VM IP directly: http://172.26.156.205:$(PORT))"
 
 # ======================================================================================
 

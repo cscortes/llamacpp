@@ -166,6 +166,7 @@ Run `make info` for the full structured reference. Key targets:
 - **GPU access** uses `--device nvidia.com/gpu=all` (CDI) rather than `--gpus all`. Requires `make setup-gpu` + `podman machine stop && podman machine start` after every `make reset`.
 - **WSL GPU device**: In WSL mode the GPU appears as `/dev/dxg` (not `/dev/nvidia0`). `make live-stats` reports "WSL passthrough mode" when working. Use `make logs | grep -i cuda` to confirm CUDA initialised inside the container.
 - **Full GPU setup sequence**: `make reset` → `make setup-gpu` → `podman machine stop && podman machine start` → `HARDWARE_PROFILE=rog3060 make build` → `HARDWARE_PROFILE=rog3060 make server` → `make logs` → `make live-stats`.
+- **New shortcut**: `make rog3060` now automates the full ROG 3060 workflow, including model download, reset, GPU setup, Podman restart, build, and server start.
 - **If `make live-stats` shows GPU access NO after all steps**: the Podman machine restart was likely skipped. Stop the server, restart the machine, and start the server again.
 - Tested with coding models on CUDA (RTX 3060, CUDA_ARCH=86). Update the profile block in `Makefile` for other GPUs.
 
