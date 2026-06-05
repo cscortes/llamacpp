@@ -53,15 +53,18 @@ ifeq ($(HARDWARE_PROFILE),rog3060)
   THREADS = 12
   # 20 layers on GPU leaves ~1.8GB headroom for KV cache + compute on 6GB VRAM laptop.
   # Raise toward 28 (all layers) only after confirming the model loads without OOM.
-  N_GPU_LAYERS = 10
+  # 28 does not fit on 6GB VRAM with 8192 context, but 26 does with some headroom (see logs/live-stats).
+  N_GPU_LAYERS = 22
   RAM_GB = 40
   VRAM_GB = 6
   PODMAN_RAM_MB = 32768
   # 8192 context fits within the ~1.8GB headroom left by 20 GPU layers.
-  CONTEXT_SIZE = 8192
+  # can we increase this?
+  #
+  CONTEXT_SIZE = 16384
   # cache-type-k/v quantization requires Flash Attention (--flash-attn / -DLLAMA_FLASH_ATTN=ON).
   # Removed until FA is compiled in; default fp16 KV cache works fine at 10 GPU layers + 8192 ctx.
-  VIDEO_OPT_FLAGS = --no-mmap
+  VIDEO_OPT_FLAGS = --no-mmap  --parallel 1
   # --device nvidia.com/gpu=all requires nvidia-container-toolkit + CDI in the Podman VM.
   # Run 'make setup-gpu' then 'podman machine stop && podman machine start' if this fails.
   RUN_CAPS = --cap-add=IPC_LOCK --ipc=host --device nvidia.com/gpu=all
@@ -355,7 +358,7 @@ live-stats:
 		| grep -oP '(?<=--n-gpu-layers )\d+'); \
 	N_LAYERS=$${N_LAYERS:-0}; \
 	if [ "$$N_LAYERS" = "0" ]; then \
-		echo "  GPU layers : 0  (CPU-only — rebuild with HARDWARE_PROFILE=rog3060 for GPU)"; \
+		echo "  GPU layers : 0  (CPU-only - rebuild with HARDWARE_PROFILE=rog3060 for GPU)"; \
 	else \
 		echo "  GPU layers : $$N_LAYERS offloaded to GPU"; \
 	fi; \
@@ -366,7 +369,7 @@ live-stats:
 		'[ -e /dev/dxg ] && echo wsl || echo native' 2>/dev/null); \
 	if [ "$$GPU_DEVS" -gt 0 ]; then \
 		[ "$$DXG" = "wsl" ] \
-			&& echo "  GPU access : YES  (/dev/dxg — WSL passthrough mode)" \
+			&& echo "  GPU access : YES  (/dev/dxg - WSL passthrough mode)" \
 			|| echo "  GPU access : YES  ($$GPU_DEVS /dev/nvidia device(s))"; \
 		WSL_SMI=$$(podman exec llamacpp-server sh -c \
 			'find /usr/lib/wsl/drivers -name nvidia-smi 2>/dev/null | head -1' 2>/dev/null); \
@@ -380,13 +383,11 @@ live-stats:
 			GU=$$(echo "$$SMIOUT"    | cut -d, -f4 | tr -d ' '); \
 			echo "  GPU       : $$GNAME"; \
 			echo "  GPU VRAM  : $${MU} MiB / $${MT} MiB  ($${GU}% util)"; \
-		else \
-			echo "  GPU VRAM  : (nvidia-smi not in container — check make logs for CUDA init)"; \
 		fi; \
 	else \
 		echo "  GPU access : NO  (/dev/nvidia* and /dev/dxg not found in container)"; \
 		[ "$$N_LAYERS" != "0" ] && \
-			echo "               WARNING: $$N_LAYERS layers requested but no GPU visible — try: podman machine stop && podman machine start" || true; \
+			echo "               WARNING: $$N_LAYERS layers requested but no GPU visible - try: podman machine stop && podman machine start" || true; \
 		VM_SMI=$$(podman machine ssh \
 			"find /usr/lib/wsl/drivers -name nvidia-smi 2>/dev/null | head -1" 2>/dev/null); \
 		VMGPU=$$(podman machine ssh \
@@ -396,9 +397,9 @@ live-stats:
 			VGNAME=$$(echo "$$VMGPU" | cut -d, -f1 | sed 's/^ *//;s/ *$$//'); \
 			VMU=$$(echo "$$VMGPU" | cut -d, -f2 | tr -d ' '); \
 			VMT=$$(echo "$$VMGPU" | cut -d, -f3 | tr -d ' '); \
-			echo "  GPU (VM)  : $$VGNAME — $${VMU}/$${VMT} MiB  (present in VM but NOT reaching container)"; \
+			echo "  GPU (VM)  : $$VGNAME - $${VMU}/$${VMT} MiB  (present in VM but NOT reaching container)"; \
 		else \
-			echo "  GPU (VM)  : not reachable — run 'make setup-gpu' if not done, then restart Podman machine"; \
+			echo "  GPU (VM)  : not reachable - run 'make setup-gpu' if not done, then restart Podman machine"; \
 		fi; \
 	fi; \
 	echo ""; \
@@ -458,7 +459,7 @@ build-extension:
 	@echo "  Model picker:  Open Copilot Chat model dropdown → select phi / qwen2 / deep"
 	@echo "  Switch model:  Ctrl+Shift+P -> 'llama.cpp: Switch Model'"
 	@echo "  Inline:        Copilot ghost-text is disabled; llama.cpp handles all completions"
-	@echo "  Package:       npm install -g @vscode/vsce && vsce package --allow-proposed-api"
+	@echo "  Package:       npm install -g @vscode/vsce && cd vscode-llamacpp && vsce package"
 
 # ======================================================================================
 # setup-gpu: installs nvidia-container-toolkit inside the Podman VM and generates the
@@ -499,7 +500,7 @@ setup-gpu:
 		elif command -v nvidia-smi >/dev/null 2>&1; then \
 			nvidia-smi --query-gpu=name,driver_version --format=csv,noheader; \
 		else \
-			echo "nvidia-smi not in PATH (normal in WSL mode — GPU confirmed via CDI spec)"; \
+			echo "nvidia-smi not in PATH (normal in WSL mode - GPU confirmed via CDI spec)"; \
 		fi; \
 	' || { \
 		echo ""; \
@@ -512,7 +513,11 @@ setup-gpu:
 	}
 	@echo ""
 	@echo "SUCCESS: toolkit installed and CDI spec generated."
-	@echo "Run: HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2"
+	@echo "Restarting Podman machine so CDI config takes effect..."
+	podman machine stop
+	podman machine start
+	@echo ""
+	@echo "Podman machine restarted. Run: HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2"
 	@echo "Then: make live-stats  (GPU access should show YES)"
 
 vm-ip:

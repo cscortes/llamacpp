@@ -79,6 +79,7 @@
       }
     ]
   },
+  "enabledApiProposals": ["languageModelChatProvider"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "scripts": {
@@ -90,5 +91,14 @@
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.96.0",
     "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cscortes/llamacpp"
+  },
+  "__metadata": {
+    "id": "abc123def456",
+    "publisherDisplayName": "Llama.cpp Local",
+    "publisherId": "llamacpp-local"
   }
 }
