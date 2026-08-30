@@ -23,8 +23,50 @@ export const MODELS: ModelDef[] = [
     {
         id: 'deep',
         label: 'DeepSeek-Coder-V2-Lite-Instruct',
-        detail: '7.6 GB · most capable · best for complex tasks',
+        detail: '5.5 GB · Lite Q3 · 3060 stretch',
         supportsFim: true,
+    },
+    {
+        id: 'qwen14',
+        label: 'Qwen2.5-Coder-14B-Instruct',
+        detail: '9 GB · 14B Q4 · 5060 Ti daily coding',
+        supportsFim: true,
+    },
+    {
+        id: 'deep5',
+        label: 'DeepSeek-Coder-V2-Lite-Instruct Q5',
+        detail: '12 GB · Lite Q5 · 5060 Ti coding stretch',
+        supportsFim: true,
+    },
+    {
+        id: 'chat3',
+        label: 'Qwen2.5-3B-Instruct',
+        detail: '2 GB · language · 3060',
+        supportsFim: false,
+    },
+    {
+        id: 'chat7',
+        label: 'Qwen2.5-7B-Instruct',
+        detail: '4.7 GB · language · 3060 / 5060 Ti',
+        supportsFim: false,
+    },
+    {
+        id: 'chat14',
+        label: 'Qwen2.5-14B-Instruct',
+        detail: '9 GB · 14B Q4 · 5060 Ti daily language',
+        supportsFim: false,
+    },
+    {
+        id: 'chat14q6',
+        label: 'Qwen2.5-14B-Instruct Q6',
+        detail: '12 GB · 14B Q6 · 5060 Ti language stretch',
+        supportsFim: false,
+    },
+    {
+        id: 'aya8',
+        label: 'Aya Expanse 8B',
+        detail: '5 GB · 23 languages · 3060 stretch / 5060 easy',
+        supportsFim: false,
     },
 ];
 

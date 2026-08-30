@@ -1,18 +1,18 @@
 # ======================================================================================
 # Podman/Docker multi-stage build for llama.cpp (GPU/CUDA).
 # Features: ccache, OpenBLAS, CUDA acceleration, llama-cli/server, coding GGUF models.
-# Base: nvidia/cuda:12.5.1 (devel + runtime). Podman networking (slirp4netns/WSL) often binds IPv6-only on Windows.
+# Base: nvidia/cuda:12.8.1 (devel + runtime). Podman networking (slirp4netns/WSL) often binds IPv6-only on Windows.
 #
-# Quick Start (Windows):
-#   make getmodels
-#   make reset   # MUST use Git Bash
-#   make build
-#   make server PORT=18080   # Uses localhost:18080 (via win-forward if needed)
-#   make win-forward          # Maps VM IP to Windows localhost
-#   make test
+# Quick Start (Windows, Git Bash):
+#   make rtx5060ti            # RTX 5060 Ti: 14B, GPU toolkit, build, server
+#   make rog3060              # RTX 3060: 7B set, GPU toolkit, build, server
+#   make live-stats && make test
+# CPU: make getmodels && make reset && make build && make server
+# See README.md for profiles; techdoc.md for internals.
 #
-# Models: phi (Phi-3.5-mini), qwen2 (Qwen2.5-Coder-7B), deep (DeepSeek-Coder-V2-Lite)
-# Vars: MODEL_SHORT=[phi|qwen2|deep] PORT=18080
+# Models: coding phi/qwen2/deep/qwen14/deep5 | language chat3/chat7/chat14/chat14q6 | aya8
+# Vars: MODEL_SHORT=... PORT=18080
+
 #
 # Server: http://localhost:18080 or http://172.26.156.205:18080/v1/chat/completions
 # Stop: make stop
@@ -20,35 +20,75 @@
 # Note: Podman VM IP (172.26.156.205) used for reliable access. win-forward creates netsh proxy.
 # ======================================================================================
 
-# Force bash (Git Bash on Windows; required for reset/heredoc/||). Windows targets (test/win-forward) updated for compatibility.
+# Force bash (Git Bash on Windows; required for reset/heredoc/||).
 SHELL := bash
+# Podman ssh passes UserKnownHostsFile=NUL. Git Bash/MSYS treats that as ./NUL
+# (a real file of SSH host keys). Disable MSYS path conversion so NUL stays the discard device.
+export MSYS_NO_PATHCONV := 1
+export MSYS2_ARG_CONV_EXCL := *
 
-.PHONY: build clean reset run help info getmodels cli server stop prune build-extension live-stats setup-gpu rog3060 rog3060-build rog3060-server restart-podman
+.PHONY: build clean reset run help info getmodels getmodels-5060ti getmodels-deep5 getmodels-lang getmodels-lang-5060ti getmodels-chat14q6 getmodels-aya list-models cli server stop prune build-extension live-stats setup-gpu rog3060 rog3060-build rog3060-server restart-podman rtx5060ti rtx5060ti-reset rtx5060ti-build rtx5060ti-server
 .DEFAULT_GOAL := info
 
-# Model short names (case-insensitive partial match):
-#   phi     -> Phi-3.5-mini-instruct-q4_K_M.gguf (~2.5GB)
-#   qwen2   -> Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf (~4.7GB, default)
-#   deep    -> DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf (~5.5GB)
+# Model short names (more specific findstring matches first: chat14q6 before chat14, deep5 before deep).
+#   Coding:     phi, qwen2, deep, qwen14, deep5
+#   Language:   chat3, chat7, chat14, chat14q6, aya8 (23-language)
 MODEL_SHORT ?= qwen2
 PORT ?= 18080
+DOWNLOAD_HINT := make getmodels
 
 ifeq ($(findstring phi,$(MODEL_SHORT)),phi)
 MODEL_FILE = Phi-3.5-mini-instruct-q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels
+else ifeq ($(findstring qwen14,$(MODEL_SHORT)),qwen14)
+MODEL_FILE = Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels-5060ti
+else ifeq ($(findstring chat14q6,$(MODEL_SHORT)),chat14q6)
+MODEL_FILE = Qwen2.5-14B-Instruct-Q6_K.gguf
+DOWNLOAD_HINT = make getmodels-chat14q6
+else ifeq ($(findstring chat14,$(MODEL_SHORT)),chat14)
+MODEL_FILE = Qwen2.5-14B-Instruct-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels-lang-5060ti
+else ifeq ($(findstring chat7,$(MODEL_SHORT)),chat7)
+MODEL_FILE = Qwen2.5-7B-Instruct-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels-lang
+else ifeq ($(findstring chat3,$(MODEL_SHORT)),chat3)
+MODEL_FILE = Qwen2.5-3B-Instruct-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels-lang
+else ifeq ($(findstring aya8,$(MODEL_SHORT)),aya8)
+MODEL_FILE = aya-expanse-8b-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels-aya
 else ifeq ($(findstring qwen,$(MODEL_SHORT)),qwen)
 MODEL_FILE = Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels
+else ifeq ($(findstring deep5,$(MODEL_SHORT)),deep5)
+MODEL_FILE = DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf
+DOWNLOAD_HINT = make getmodels-deep5
 else ifeq ($(findstring deep,$(MODEL_SHORT)),deep)
 MODEL_FILE = DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf
+DOWNLOAD_HINT = make getmodels
 else
 MODEL_FILE = Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+DOWNLOAD_HINT = make getmodels
 endif
 
-# Hardware profile (activatable via HARDWARE_PROFILE=rog3060 make ...).
+# Hardware profile (HARDWARE_PROFILE=rtx5060ti|rog3060 make ...).
 # Controls RAM_GB (system memory, mlock, no-mmap, Podman --memory) vs VRAM_GB
-# (n-gpu-layers, MoE experts to CPU, KV cache quant for VRAM savings per video).
-# Mirrors MODEL_SHORT pattern; extensible for other hardware.
+# (n-gpu-layers, MoE experts to CPU, KV cache quant). Extensible: copy an ifeq block.
 HARDWARE_PROFILE ?= default
-ifeq ($(HARDWARE_PROFILE),rog3060)
+ifeq ($(HARDWARE_PROFILE),rtx5060ti)
+  CUDA_ARCH = 120
+  THREADS = 12
+  # 16GB VRAM holds a 7B Q4 plus large context; 99 = offload all layers.
+  N_GPU_LAYERS = 99
+  RAM_GB = 24
+  VRAM_GB = 16
+  # 20GB VM leaves ~11GB for Windows on a 31GB host.
+  PODMAN_RAM_MB = 20480
+  CONTEXT_SIZE = 16384
+  VIDEO_OPT_FLAGS = --no-mmap --parallel 1
+  RUN_CAPS = --cap-add=IPC_LOCK --ipc=host --device nvidia.com/gpu=all
+else ifeq ($(HARDWARE_PROFILE),rog3060)
   CUDA_ARCH = 86
   THREADS = 12
   # 20 layers on GPU leaves ~1.8GB headroom for KV cache + compute on 6GB VRAM laptop.
@@ -58,15 +98,10 @@ ifeq ($(HARDWARE_PROFILE),rog3060)
   RAM_GB = 40
   VRAM_GB = 6
   PODMAN_RAM_MB = 32768
-  # 8192 context fits within the ~1.8GB headroom left by 20 GPU layers.
-  # can we increase this?
-  #
   CONTEXT_SIZE = 16384
   # cache-type-k/v quantization requires Flash Attention (--flash-attn / -DLLAMA_FLASH_ATTN=ON).
-  # Removed until FA is compiled in; default fp16 KV cache works fine at 10 GPU layers + 8192 ctx.
-  VIDEO_OPT_FLAGS = --no-mmap  --parallel 1
+  VIDEO_OPT_FLAGS = --no-mmap --parallel 1
   # --device nvidia.com/gpu=all requires nvidia-container-toolkit + CDI in the Podman VM.
-  # Run 'make setup-gpu' then 'podman machine stop && podman machine start' if this fails.
   RUN_CAPS = --cap-add=IPC_LOCK --ipc=host --device nvidia.com/gpu=all
 else
   # Default: conservative CPU-only (matches prior server target)
@@ -84,6 +119,12 @@ endif
 
 IMAGE_NAME := llamacpp
 TAG := latest
+# Bind-mount dir for ccache. Podman on Windows treats --volume name:path as a host
+# path, so a named volume fails with faccessat .../ccache-llama. Make creates this.
+CCACHE_DIR := ccache-llama
+
+$(CCACHE_DIR):
+	mkdir -p $@
 
 # ======================================================================================
 # Full Podman/WSL reset (profile-driven RAM_GB via PODMAN_RAM_MB; 32GB+ for rog3060).
@@ -107,22 +148,21 @@ reset:
 
 # ======================================================================================
 # Build the GPU (CUDA) Podman image (note: current Dockerfile is server-only with --n-gpu-layers 0).
-# Mounts permanent `ccache-llama` volume. Run `make reset` (Git Bash) first for WSL/Podman stability.
+# Bind-mounts ./ccache-llama (created if missing). Run `make reset` (Git Bash) first.
 # ======================================================================================
-build:
+build: $(CCACHE_DIR)
 	@echo "=== Building with profile $(HARDWARE_PROFILE) (CUDA_ARCH=$(CUDA_ARCH), RAM_GB=$(RAM_GB)) ==="
-	@echo "First build takes 10-20+ minutes (CUDA kernels if rog3060). Later builds use ccache."
-	-podman volume create ccache-llama 2>/dev/null || true
+	@echo "First build takes 10-20+ minutes (CUDA kernels if GPU profile). Later builds use ccache."
 	podman build --pull=newer \
-		--volume ccache-llama:/root/.ccache \
+		--volume ./$(CCACHE_DIR):/root/.ccache \
 		--build-arg CUDA_ARCH=$(CUDA_ARCH) \
 		--tag $(IMAGE_NAME):$(TAG) \
 		--tag localhost/$(IMAGE_NAME):$(TAG) \
 		--file Dockerfile .
 	@echo ""
 	@echo "Build successful! Image '$(IMAGE_NAME):$(TAG)' (and localhost/ variant) is ready (profile: $(HARDWARE_PROFILE))."
-	@echo "Run 'make ccache-stats' or 'HARDWARE_PROFILE=rog3060 make server'."
-	@echo "(ccache volume persists across cleans, resets, and prune.)"
+	@echo "Run 'make ccache-stats' or 'HARDWARE_PROFILE=rtx5060ti make server'."
+	@echo "(./$(CCACHE_DIR) persists across cleans, resets, and prune.)"
 
 # ======================================================================================
 # Remove image + stop/rm server container (cache preserved). Use `make clean-cache` or `make prune` for more.
@@ -132,15 +172,16 @@ clean:
 	-podman stop llamacpp-server 2>/dev/null || true
 	-podman rm -f llamacpp-server 2>/dev/null || true
 	-podman rmi -f $(IMAGE_NAME):$(TAG) localhost/$(IMAGE_NAME):$(TAG) 2>/dev/null || true
-	@echo "Clean complete: image and server container removed (ccache-llama volume preserved)."
+	@echo "Clean complete: image and server container removed (./$(CCACHE_DIR) preserved)."
 
 clean-cache:
+	-rm -rf $(CCACHE_DIR)
 	-podman volume rm -f ccache-llama 2>/dev/null || true
-	@echo "ccache volume removed. Run 'make build' to recreate and repopulate cache."
+	@echo "ccache directory removed. Run 'make build' to recreate and repopulate cache."
 
-ccache-stats:
-	@echo "=== ccache statistics (permanent volume) ==="
-	-podman run --rm --volume ccache-llama:/root/.ccache nvidia/cuda:12.5.1-devel-ubuntu22.04 \
+ccache-stats: $(CCACHE_DIR)
+	@echo "=== ccache statistics (./$(CCACHE_DIR)) ==="
+	-podman run --rm --volume ./$(CCACHE_DIR):/root/.ccache nvidia/cuda:12.8.1-devel-ubuntu22.04 \
 		bash -c "apt-get update -qq && apt-get install -y -qq ccache && ccache -s" 2>/dev/null || echo "Cache not initialized yet (run 'make build' first)."
 
 # ======================================================================================
@@ -149,12 +190,56 @@ ccache-stats:
 run:
 	podman run --rm -it localhost/$(IMAGE_NAME):$(TAG) --help
 
+# Health check: GOOD if /v1/models answers on 127.0.0.1 or the Podman VM IP.
+# BROKEN if the container is down or the API never comes up. localhost miss
+# alone is not BROKEN (normal on Windows/WSL). Waits while the model loads.
 test:
-	@echo "=== Testing server API (requires 'make server' first) ==="
-	@podman ps --format '{{.Names}}' | grep -q llamacpp-server 2>/dev/null || (echo "Server not running (check with 'podman ps'). Run 'make server' first." && exit 1)
-	@powershell -Command "try { $$r = Invoke-WebRequest -Uri http://localhost:$(PORT)/v1/models -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop; Write-Host 'Server test passed (models endpoint responding).' -ForegroundColor Green } catch { Write-Host 'API test failed. Check make logs, run make win-forward, or use VM IP 172.26.156.205:$(PORT). Restart with make stop && make server.' -ForegroundColor Red; exit 1 }"
-	@echo "Full chat test example:"
-	@echo "curl http://localhost:$(PORT)/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"qwen2\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'"
+	@echo "=== make test: is the server good or broken? ==="
+	@if ! podman ps --format '{{.Names}}' | grep -q llamacpp-server 2>/dev/null; then \
+		echo ""; \
+		echo "RESULT: BROKEN  -- container llamacpp-server is not running"; \
+		if podman ps -a --format '{{.Names}}' | grep -q llamacpp-server 2>/dev/null; then \
+			echo "  It started then exited. Last logs:"; \
+			podman logs --tail 20 llamacpp-server 2>&1 | sed 's/^/    /'; \
+			echo "  If those say 'No such file', download the GGUF first (make list-models)."; \
+		else \
+			echo "  Fix: make rtx5060ti   or   make rog3060   or   HARDWARE_PROFILE=... make server"; \
+		fi; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "  Container : running"
+	@VM_IP=$$(podman machine ssh "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" 2>/dev/null || true); \
+	OK_URL=; LOCAL=no; \
+	i=1; \
+	while [ $$i -le 30 ]; do \
+		if curl -sf --max-time 3 "http://127.0.0.1:$(PORT)/v1/models" >/dev/null 2>&1; then \
+			OK_URL="http://127.0.0.1:$(PORT)"; LOCAL=yes; break; \
+		fi; \
+		if [ -n "$$VM_IP" ] && curl -sf --max-time 3 "http://$$VM_IP:$(PORT)/v1/models" >/dev/null 2>&1; then \
+			OK_URL="http://$$VM_IP:$(PORT)"; break; \
+		fi; \
+		if [ $$i -eq 1 ]; then echo "  API       : waiting for model load (up to ~90s)"; fi; \
+		sleep 3; \
+		i=$$((i + 1)); \
+	done; \
+	if [ -z "$$OK_URL" ]; then \
+		echo "  localhost : no"; \
+		echo "  VM IP     : $${VM_IP:-unknown}  -- no response"; \
+		echo ""; \
+		echo "RESULT: BROKEN  -- container is up but /v1/models never answered"; \
+		echo "  make logs     (need 'listening on' and no CUDA/OOM errors)"; \
+		echo "  make live-stats"; \
+		echo ""; \
+		exit 1; \
+	fi; \
+	if [ "$$LOCAL" = yes ]; then echo "  localhost : yes  ($$OK_URL)"; \
+	else echo "  localhost : no   (expected on Windows/WSL -- not a failure)"; fi; \
+	if [ -n "$$VM_IP" ]; then echo "  VM IP     : yes  (http://$$VM_IP:$(PORT))"; fi; \
+	echo ""; \
+	echo "RESULT: GOOD  -- API is up at $$OK_URL"; \
+	echo "  curl $$OK_URL/v1/models"; \
+	echo "  curl $$OK_URL/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"qwen14\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'"
 
 # ======================================================================================
 # Show all targets/usage (updated for SHELL=bash, clean enhancements, and Git Bash requirement)
@@ -164,26 +249,34 @@ help:
 	@echo "  make reset        - Full Podman/WSL reset (profile-driven RAM)"
 	@echo "  make build        - Build with profile (CUDA_ARCH from VRAM_GB)"
 	@echo "  make clean        - Remove image + server container (cache preserved)"
-	@echo "  make clean-cache  - Reset ccache volume"
+	@echo "  make clean-cache  - Delete ./ccache-llama (forces full recompile)"
 	@echo "  make ccache-stats - Show ccache statistics"
 	@echo "  make server       - Start HTTP server/API (uses profile)"
-	@echo "  make rog3060      - Run the full ROG 3060 GPU setup workflow (getmodels, reset, setup-gpu, restart, build, server)"
-	@echo "  make test         - Test API (uses localhost after win-forward)"
+	@echo "  make rtx5060ti    - Full RTX 5060 Ti GPU workflow (14B, reset, setup-gpu, build, server)"
+	@echo "  make rog3060      - Full ROG 3060 GPU workflow (getmodels, reset, setup-gpu, restart, build, server)"
+	@echo "  make test         - Health check: RESULT GOOD or BROKEN (API on localhost or VM IP)"
 	@echo "  make logs         - Follow server logs"
 	@echo "  make live-stats   - Container, process, model, memory, host URL"
 	@echo "  make stop         - Stop/remove server"
 	@echo "  make win-forward  - Map VM IP to localhost (admin PowerShell)"
 	@echo "  make vm-ip        - Show Podman VM IP"
 	@echo "  make prune        - Clean unrelated Podman resources"
-	@echo "  make getmodels         - Download models"
+	@echo "  make list-models       - List MODEL_SHORT names and files in ./models"
+	@echo "  make getmodels         - Download 3060-sized models (phi, qwen2, deep)"
+	@echo "  make getmodels-5060ti  - Download Qwen2.5-Coder-14B Q4 (~9GB) for 16GB VRAM"
+	@echo "  make getmodels-deep5   - Coding stretch: DeepSeek Lite Q5 (~12GB, 16GB VRAM)"
+	@echo "  make getmodels-lang    - Language: Qwen2.5 3B+7B Instruct (3060)"
+	@echo "  make getmodels-lang-5060ti - Language: Qwen2.5 14B Instruct Q4 (16GB)"
+	@echo "  make getmodels-chat14q6 - Language stretch: Qwen2.5 14B Instruct Q6 (~12GB)"
+	@echo "  make getmodels-aya     - Multilingual: Aya Expanse 8B Q4 (~5GB, 23 languages)"
 	@echo "  make build-extension   - Build the VS Code extension (requires Node.js 18+)"
 	@echo "  make info              - Full structured target reference (primary + secondary)"
 	@echo "  make help              - Show this compact list"
 	@echo ""
 	@echo "NOTE: Use Git Bash for all targets (SHELL=bash). pwsh causes parse errors."
-	@echo "HARDWARE_PROFILE=rog3060 (or default) controls RAM_GB vs VRAM_GB + video flags."
-	@echo "Override: HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=deep PORT=18080"
-	@echo "See README.md and profile block for RAM (mlock/no-mmap) vs VRAM (layers/KV) details."
+	@echo "HARDWARE_PROFILE=rtx5060ti|rog3060|default controls RAM_GB vs VRAM_GB + video flags."
+	@echo "Override: HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=deep PORT=18080"
+	@echo "See README.md (quickstart) and techdoc.md (profile variables)."
 
 # ======================================================================================
 # info: structured reference of all targets, split into primary and secondary.
@@ -193,15 +286,23 @@ info:
 	@echo ""
 	@echo "============================== llama.cpp + VS Code =============================="
 	@echo ""
-	@echo "Models : phi (Phi-3.5-mini 2.5GB) | qwen2 (Qwen2.5-Coder-7B 4.4GB, default)"
-	@echo "       : deep (DeepSeek-Coder-V2-Lite 7.6GB)"
+	@echo "Models : coding  phi | qwen2 | deep | qwen14 | deep5"
+	@echo "       : language chat3 | chat7 | chat14 | chat14q6 | aya8 (23 languages)"
 	@echo "API    : http://localhost:$(PORT)/v1/chat/completions  (OpenAI-compatible)"
-	@echo "Profile: HARDWARE_PROFILE=rog3060  (RTX 3060, 40GB RAM, GPU layers + video opts)"
-	@echo "         HARDWARE_PROFILE=default  (CPU-only, conservative, no GPU)"
+	@echo "Profile: HARDWARE_PROFILE=rtx5060ti  (RTX 5060 Ti 16GB, CUDA arch 120, all GPU layers)"
+	@echo "         HARDWARE_PROFILE=rog3060    (RTX 3060 6GB, CUDA arch 86, 22 GPU layers)"
+	@echo "         HARDWARE_PROFILE=default    (CPU-only, conservative, no GPU)"
 	@echo ""
 	@echo "-------------------------------- Primary Targets --------------------------------"
 	@echo ""
-	@echo "  make getmodels                      Download all 3 GGUF coding models (~13 GB)"
+	@echo "  make list-models                    List shorts and ./models"
+	@echo "  make getmodels                      Coding 3060 set (phi, qwen2, deep)"
+	@echo "  make getmodels-5060ti               Coding 14B Q4 (MODEL_SHORT=qwen14)"
+	@echo "  make getmodels-deep5                Coding stretch DeepSeek Lite Q5 (deep5)"
+	@echo "  make getmodels-lang                 Language 3B+7B Instruct"
+	@echo "  make getmodels-lang-5060ti          Language 14B Instruct Q4 (chat14)"
+	@echo "  make getmodels-chat14q6             Language stretch 14B Instruct Q6 (chat14q6)"
+	@echo "  make getmodels-aya                  Multilingual Aya Expanse 8B (aya8, 23 languages)"
 	@echo "  make reset                          Init/reinit Podman + WSL (Git Bash only)"
 	@echo "  make build                          Build the llama.cpp container image"
 	@echo "  make server  [MODEL_SHORT=qwen2]    Start API server on port $(PORT) (background)"
@@ -210,41 +311,54 @@ info:
 	@echo "  make clean                          Remove image + container (keeps ccache)"
 	@echo "  make build-extension                Build the VS Code extension (Copilot Chat + model picker + inline)"
 	@echo ""
-	@echo "  Typical first-time flow:"
-	@echo "    make getmodels"
-	@echo "    make reset                        (Git Bash; one-time Podman/WSL setup)"
-	@echo "    make build"
-	@echo "    make server"
-	@echo "    make test"
-	@echo "    make build-extension"
+	@echo "  Typical first-time flow (GPU, this PC):"
+	@echo "    make rtx5060ti                   (ends with make test)"
+	@echo "  CPU-only:"
+	@echo "    make getmodels && make reset && make build && make server && make test"
 	@echo ""
 	@echo "------------------------------- Secondary Targets -------------------------------"
 	@echo ""
 	@echo "  make setup-gpu                      Install nvidia-container-toolkit + CDI in Podman VM"
 	@echo "  make live-stats                     Container state, process, model, memory, host URL"
-	@echo "  make rog3060                        Run the full ROG 3060 GPU setup workflow"
+	@echo "  make rtx5060ti                      Full RTX 5060 Ti GPU setup workflow"
+	@echo "  make rog3060                        Full ROG 3060 GPU setup workflow"
 	@echo "  make win-forward  [PORT=$(PORT)]        Proxy VM IP to localhost (run as Admin)"
 	@echo "  make vm-ip                          Print current Podman VM IP address"
 	@echo "  make logs                           Stream server container logs"
 	@echo "  make ccache-stats                   Show compiler cache hit rate and size"
-	@echo "  make clean-cache                    Delete ccache volume (forces full recompile)"
+	@echo "  make clean-cache                    Delete ./ccache-llama (forces full recompile)"
 	@echo "  make prune                          Remove unused Podman resources (safe)"
 	@echo "  make run                            Run container with --help (smoke test)"
 	@echo "  make info                           Show this reference"
 	@echo "  make help                           Show compact target list"
 	@echo ""
 	@echo "  Variable overrides (example):"
-	@echo "    HARDWARE_PROFILE=rog3060 MODEL_SHORT=deep PORT=18080 make server"
+	@echo "    HARDWARE_PROFILE=rtx5060ti MODEL_SHORT=deep PORT=18080 make server"
 	@echo ""
 	@echo "================================================================================"
 
-# Convenience target for this hardware (uses profile vars for RAM/VRAM/video optimizations).
-# Runs the full ROG 3060 workflow: models, reset, GPU setup, restart, build, and server.
-rog3060: getmodels reset setup-gpu restart-podman rog3060-build rog3060-server
+# Full first-run: 14B model, VM RAM, GPU toolkit/CDI, CUDA build, server.
+# Do not replace this with bare `HARDWARE_PROFILE=... make build && make server`
+# — that skips setup-gpu and fails with "unresolvable CDI devices nvidia.com/gpu=all".
+rtx5060ti: getmodels-5060ti rtx5060ti-reset setup-gpu restart-podman rtx5060ti-build rtx5060ti-server
+	@$(MAKE) test
 	@echo ""
-	@echo "ROG 3060 setup complete. Verify GPU initialization with:"
-	@echo "  make logs | grep -E \"CUDA|cuda|n_gpu_layers|device\""
-	@echo "  make live-stats"
+	@echo "RTX 5060 Ti setup complete (qwen14). Optional: make live-stats"
+	@echo ""
+
+rtx5060ti-reset:
+	HARDWARE_PROFILE=rtx5060ti make reset
+
+rtx5060ti-build:
+	HARDWARE_PROFILE=rtx5060ti make build
+
+rtx5060ti-server:
+	HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=qwen14
+
+rog3060: getmodels reset setup-gpu restart-podman rog3060-build rog3060-server
+	@$(MAKE) test
+	@echo ""
+	@echo "ROG 3060 setup complete (qwen2). Optional: make live-stats"
 	@echo ""
 
 restart-podman:
@@ -255,6 +369,37 @@ rog3060-build:
 
 rog3060-server:
 	HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2
+
+# ======================================================================================
+# List MODEL_SHORT names and what is already in ./models
+# ======================================================================================
+list-models:
+	@echo "Select with:  HARDWARE_PROFILE=<profile> make server MODEL_SHORT=<short>"
+	@echo ""
+	@echo "  Coding"
+	@echo "  short   file                                              download                 VRAM"
+	@echo "  phi     Phi-3.5-mini-instruct-q4_K_M.gguf                 make getmodels           6GB+"
+	@echo "  qwen2   Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf             make getmodels           6GB+"
+	@echo "  deep    DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf       make getmodels           6GB"
+	@echo "  qwen14  Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf            make getmodels-5060ti    16GB"
+	@echo "  deep5   DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf       make getmodels-deep5     16GB"
+	@echo ""
+	@echo "  Language (general instruct, not coder)"
+	@echo "  chat3    Qwen2.5-3B-Instruct-Q4_K_M.gguf                  make getmodels-lang      6GB+"
+	@echo "  chat7    Qwen2.5-7B-Instruct-Q4_K_M.gguf                  make getmodels-lang      6GB+"
+	@echo "  chat14   Qwen2.5-14B-Instruct-Q4_K_M.gguf                 make getmodels-lang-5060ti  16GB"
+	@echo "  chat14q6 Qwen2.5-14B-Instruct-Q6_K.gguf                   make getmodels-chat14q6  16GB"
+	@echo "  aya8     aya-expanse-8b-Q4_K_M.gguf                       make getmodels-aya       6GB+"
+	@echo ""
+	@echo "On disk (./models):"
+	@if ls models/*.gguf >/dev/null 2>&1; then \
+		ls -lh models/*.gguf | awk '{printf "  %s  %s\n", $$5, $$9}'; \
+	else \
+		echo "  (empty -- run a getmodels* target)"; \
+	fi
+	@echo ""
+	@echo "Example:  HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=chat14"
+	@echo "Then:     make test"
 
 # ======================================================================================
 # Download 3 coding GGUF models to ./models (~13GB)
@@ -281,6 +426,70 @@ getmodels:
 		curl -L -o models/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q3_K_M.gguf; \
 	fi
 	@echo "Models ready in models/!"
+	@echo "These are sized for 6GB VRAM (RTX 3060). On a 5060 Ti (16GB), also run: make getmodels-5060ti"
+
+# 14B Q4 (~9GB) fits 16GB VRAM with 16k context. Also pulled by make rtx5060ti.
+getmodels-5060ti:
+	mkdir -p models
+	@echo "Checking 5060 Ti model in models/ ..."
+	@if [ -f models/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf ]; then \
+		echo "Skipping Qwen2.5-Coder-14B Q4 (already present)."; \
+	else \
+		echo "Downloading Qwen2.5-Coder-14B-Instruct Q4_K_M (~9GB)..."; \
+		curl -L -o models/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf; \
+	fi
+	@echo "5060 Ti daily coding model ready. Start with:"
+	@echo "  HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=qwen14"
+	@echo "Optional stretch: make getmodels-deep5  (MODEL_SHORT=deep5)"
+
+# DeepSeek Lite Q5 (~12GB). Same model as `deep` at a quant that is worth using on 16GB.
+getmodels-deep5:
+	mkdir -p models
+	@echo "Checking DeepSeek Lite Q5 in models/ ..."
+	@if [ -f models/DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf ]; then echo "Skipping deep5 (already present)."; \
+	else echo "Downloading DeepSeek-Coder-V2-Lite-Instruct Q5_K_M (~12GB)..."; \
+		curl -L -o models/DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf; fi
+	@echo "Start with: HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=deep5"
+
+# Language (general instruct). 3060: 3B+7B. 5060 Ti: 14B Q4 (daily) / Q6 (stretch).
+getmodels-lang:
+	mkdir -p models
+	@echo "Checking language models (3060-sized) in models/ ..."
+	@if [ -f models/Qwen2.5-3B-Instruct-Q4_K_M.gguf ]; then echo "Skipping chat3 (already present)."; \
+	else echo "Downloading Qwen2.5-3B-Instruct Q4_K_M (~2GB)..."; \
+		curl -L -o models/Qwen2.5-3B-Instruct-Q4_K_M.gguf https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf; fi
+	@if [ -f models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ]; then echo "Skipping chat7 (already present)."; \
+	else echo "Downloading Qwen2.5-7B-Instruct Q4_K_M (~4.7GB)..."; \
+		curl -L -o models/Qwen2.5-7B-Instruct-Q4_K_M.gguf https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf; fi
+	@echo "Language models ready. 3060: MODEL_SHORT=chat3 or chat7. 5060 Ti can use those too, or make getmodels-lang-5060ti."
+
+getmodels-lang-5060ti:
+	mkdir -p models
+	@echo "Checking 5060 Ti language model in models/ ..."
+	@if [ -f models/Qwen2.5-14B-Instruct-Q4_K_M.gguf ]; then echo "Skipping chat14 (already present)."; \
+	else echo "Downloading Qwen2.5-14B-Instruct Q4_K_M (~9GB)..."; \
+		curl -L -o models/Qwen2.5-14B-Instruct-Q4_K_M.gguf https://huggingface.co/bartowski/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf; fi
+	@echo "Start with: HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=chat14"
+	@echo "Optional stretch: make getmodels-chat14q6  (MODEL_SHORT=chat14q6)"
+
+getmodels-chat14q6:
+	mkdir -p models
+	@echo "Checking 14B Instruct Q6 in models/ ..."
+	@if [ -f models/Qwen2.5-14B-Instruct-Q6_K.gguf ]; then echo "Skipping chat14q6 (already present)."; \
+	else echo "Downloading Qwen2.5-14B-Instruct Q6_K (~12GB)..."; \
+		curl -L -o models/Qwen2.5-14B-Instruct-Q6_K.gguf https://huggingface.co/bartowski/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q6_K.gguf; fi
+	@echo "Start with: HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=chat14q6"
+
+# Multilingual (23 languages). CC-BY-NC. ~5GB — 3060 stretch, comfortable on 5060 Ti.
+getmodels-aya:
+	mkdir -p models
+	@echo "Checking Aya Expanse 8B Q4 in models/ ..."
+	@if [ -f models/aya-expanse-8b-Q4_K_M.gguf ]; then echo "Skipping aya8 (already present)."; \
+	else echo "Downloading aya-expanse-8b Q4_K_M (~5GB)..."; \
+		curl -L -o models/aya-expanse-8b-Q4_K_M.gguf https://huggingface.co/bartowski/aya-expanse-8b-GGUF/resolve/main/aya-expanse-8b-Q4_K_M.gguf; fi
+	@echo "Start with: HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=aya8"
+	@echo "  or:       HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=aya8"
+	@echo "License: CC-BY-NC (non-commercial). 23 languages — see README."
 
 # ======================================================================================
 # Server-only mode (per request). CLI target retained but deprecated.
@@ -295,6 +504,15 @@ cli:
 # THREADS, N_GPU_LAYERS. Overrides Dockerfile CMD. Activate with HARDWARE_PROFILE=rog3060.
 # ======================================================================================
 server:
+	@missing=0; \
+	if [ ! -f models/$(MODEL_FILE) ] || [ "$$(wc -c < models/$(MODEL_FILE) 2>/dev/null || echo 0)" -lt 1000000 ]; then \
+		echo "Missing or incomplete: models/$(MODEL_FILE)"; missing=1; \
+	fi; \
+	if [ $$missing -eq 1 ]; then \
+		echo "Download first: $(DOWNLOAD_HINT)"; \
+		echo "Then: HARDWARE_PROFILE=$(HARDWARE_PROFILE) make server MODEL_SHORT=$(MODEL_SHORT)"; \
+		exit 1; \
+	fi
 	-podman rm -f llamacpp-server
 	podman run -d --name llamacpp-server \
 		--pull=never \
@@ -358,7 +576,7 @@ live-stats:
 		| grep -oP '(?<=--n-gpu-layers )\d+'); \
 	N_LAYERS=$${N_LAYERS:-0}; \
 	if [ "$$N_LAYERS" = "0" ]; then \
-		echo "  GPU layers : 0  (CPU-only - rebuild with HARDWARE_PROFILE=rog3060 for GPU)"; \
+		echo "  GPU layers : 0  (CPU-only - rebuild with HARDWARE_PROFILE=rtx5060ti or rog3060 for GPU)"; \
 	else \
 		echo "  GPU layers : $$N_LAYERS offloaded to GPU"; \
 	fi; \
@@ -405,14 +623,19 @@ live-stats:
 	echo ""; \
 	VM_IP=$$(podman machine ssh \
 		"ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" \
-		2>/dev/null || echo "172.26.156.205"); \
-	echo "  Host URL  : http://$$VM_IP:$(PORT)"; \
-	echo "  Endpoint  : http://$$VM_IP:$(PORT)/v1/chat/completions"; \
+		2>/dev/null || true); \
+	if [ -n "$$VM_IP" ]; then \
+		echo "  Host URL  : http://$$VM_IP:$(PORT)"; \
+		echo "  Endpoint  : http://$$VM_IP:$(PORT)/v1/chat/completions"; \
+	else \
+		echo "  Host URL  : http://127.0.0.1:$(PORT)"; \
+	fi; \
 	echo ""; \
-	if curl -sf --max-time 3 "http://$$VM_IP:$(PORT)/v1/models" >/dev/null 2>&1; then \
+	if curl -sf --max-time 3 "http://127.0.0.1:$(PORT)/v1/models" >/dev/null 2>&1 \
+		|| { [ -n "$$VM_IP" ] && curl -sf --max-time 3 "http://$$VM_IP:$(PORT)/v1/models" >/dev/null 2>&1; }; then \
 		echo "  API check : PASS"; \
 	else \
-		echo "  API check : FAIL  (run: make win-forward)"; \
+		echo "  API check : not ready yet (model still loading — run: make test)"; \
 	fi; \
 	echo ""
 
@@ -517,19 +740,22 @@ setup-gpu:
 	podman machine stop
 	podman machine start
 	@echo ""
-	@echo "Podman machine restarted. Run: HARDWARE_PROFILE=rog3060 make server MODEL_SHORT=qwen2"
+	@echo "Podman machine restarted. Run: HARDWARE_PROFILE=rtx5060ti make server MODEL_SHORT=qwen2"
 	@echo "Then: make live-stats  (GPU access should show YES)"
 
 vm-ip:
-	@echo "Podman VM IP:"
-	@podman machine ssh "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" 2>/dev/null || echo "172.26.156.205"
+	@podman machine ssh "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" 2>/dev/null || (echo "ERROR: could not read Podman VM IP" && exit 1)
 
+# Maps VM IP -> localhost. Git Bash expands $vars inside double quotes, so the
+# PowerShell script is single-quoted; $$ becomes $ for PowerShell after Make.
 win-forward:
 	@echo "=== Setting Windows localhost forwarding for port $(PORT) ==="
-	@VM_IP=$$(podman machine ssh "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" 2>/dev/null || echo "172.26.156.205"); \
+	@VM_IP=$$(podman machine ssh "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'" 2>/dev/null || true); \
+	if [ -z "$$VM_IP" ]; then echo "ERROR: could not read Podman VM IP."; exit 1; fi; \
 	echo "Using VM IP: $$VM_IP"; \
-	powershell -Command "$$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]'Administrator'); if (-not $$IsAdmin) { Write-Host 'ERROR: This command requires Administrator privileges.' -ForegroundColor Red; Write-Host 'Please run Git Bash or PowerShell as Administrator and try again.' -ForegroundColor Yellow; exit 1 }; $$ErrorActionPreference='SilentlyContinue'; netsh interface portproxy delete v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 | Out-Null; netsh interface portproxy add v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 connectport=$(PORT) connectaddress='$$VM_IP'; netsh interface portproxy show v4tov4 listenport=$(PORT); Write-Host 'Port forwarding active. Test with: curl http://localhost:$(PORT)/v1/models' -ForegroundColor Green" || echo "Port forwarding setup failed. Verify you ran as Administrator."
-	@echo "(Alternatively, use VM IP directly: http://172.26.156.205:$(PORT))"
+	echo "Without Admin you can already use: http://$$VM_IP:$(PORT)"; \
+	powershell.exe -NoProfile -Command '$$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); if (-not $$IsAdmin) { Write-Host "ERROR: Run Git Bash as Administrator for win-forward." -ForegroundColor Red; exit 1 }; $$ErrorActionPreference = "SilentlyContinue"; netsh interface portproxy delete v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 | Out-Null; netsh interface portproxy add v4tov4 listenport=$(PORT) listenaddress=0.0.0.0 connectport=$(PORT) connectaddress='"$$VM_IP"'; netsh interface portproxy show v4tov4; Write-Host "Port forwarding active. Test: curl http://127.0.0.1:$(PORT)/v1/models" -ForegroundColor Green' \
+	|| echo "win-forward failed. Use http://$$VM_IP:$(PORT) (no Admin needed)."
 
 # ======================================================================================
 
