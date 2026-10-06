@@ -1,6 +1,8 @@
 # Multi-stage llama.cpp server image. CUDA_ARCH build arg: 0 = CPU-only,
 # 86 = RTX 3060 (rog3060), 120 = RTX 5060 Ti Blackwell (rtx5060ti).
-# CUDA 12.8.1 is required for sm_120. Runtime registers compat libs via ld.so.conf
+# CUDA 12.8.1 is required for sm_120.
+#
+# Runtime registers compat libs via ld.so.conf
 # so libcuda.so.1 resolves even without a full driver mount.
 
 FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
